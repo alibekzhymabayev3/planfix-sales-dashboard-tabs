@@ -10,12 +10,12 @@ app = Flask(__name__, static_folder='static', static_url_path='')
 
 DATA_CACHE = {
     "planfix_fact": None,
-    "last_sync": None
+    "last_sync": None,
+    "is_loading": False
 }
 
 def run_async(coro):
-    """Безопасный запуск async-функции из синхронного Flask-роута.
-    Создаёт новый event loop в отдельном потоке — совместимо с любым WSGI-сервером."""
+    """Безопасный запуск async-функции из синхронного Flask-роута."""
     result = {}
     def target():
         loop = asyncio.new_event_loop()
@@ -32,6 +32,29 @@ def run_async(coro):
     if 'error' in result:
         raise result['error']
     return result['value']
+
+def refresh_cache_background():
+    """Обновляет кэш в фоновом потоке — не блокирует HTTP-запросы."""
+    if DATA_CACHE["is_loading"]:
+        return
+    DATA_CACHE["is_loading"] = True
+    def target():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            data = loop.run_until_complete(fetch_planfix_fact())
+            loop.close()
+            DATA_CACHE["planfix_fact"] = data
+            DATA_CACHE["last_sync"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+            print(f"Cache refreshed at {DATA_CACHE['last_sync']}")
+        except Exception as e:
+            print(f"Background refresh failed: {e}")
+        finally:
+            DATA_CACHE["is_loading"] = False
+    threading.Thread(target=target, daemon=True).start()
+
+# Прогреть кэш при старте сервера
+refresh_cache_background()
 
 @app.route('/')
 def serve_index():
@@ -61,19 +84,15 @@ def get_data():
 
         sheet_data = sanitize_data(excel_data.get('Расчет объема по месяцам', []))
 
-        if DATA_CACHE["planfix_fact"] is None:
-            try:
-                DATA_CACHE["planfix_fact"] = run_async(fetch_planfix_fact())
-                DATA_CACHE["last_sync"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-            except Exception as api_err:
-                print(f"WARN: Could not fetch facts from Planfix: {api_err}")
-                DATA_CACHE["planfix_fact"] = {}
-                DATA_CACHE["last_sync"] = "Offline (Planfix API not configured)"
+        # Если кэш ещё грузится — вернём пустой факт, но не подвесим браузер
+        planfix_fact = DATA_CACHE["planfix_fact"] or {}
+        last_sync = DATA_CACHE["last_sync"] or ("Загрузка..." if DATA_CACHE["is_loading"] else "Нет данных")
 
         response = {
             "excel_sheet": sheet_data,
-            "planfix_fact": DATA_CACHE["planfix_fact"],
-            "last_sync": DATA_CACHE["last_sync"]
+            "planfix_fact": planfix_fact,
+            "last_sync": last_sync,
+            "is_loading": DATA_CACHE["is_loading"]
         }
         return jsonify(response)
 
@@ -85,15 +104,27 @@ def get_data():
 @app.route('/api/sync', methods=['POST'])
 def sync_data():
     try:
-        DATA_CACHE["planfix_fact"] = run_async(fetch_planfix_fact())
-        DATA_CACHE["last_sync"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        return jsonify({"status": "success", "last_sync": DATA_CACHE["last_sync"]})
+        # Запускаем обновление в фоне и сразу отвечаем
+        refresh_cache_background()
+        return jsonify({
+            "status": "success",
+            "last_sync": DATA_CACHE["last_sync"] or "Обновление запущено...",
+            "is_loading": True
+        })
     except Exception as e:
         print(f"Sync failed: {e}")
         return jsonify({
             "status": "error",
-            "error": "Не удалось подключиться к Planfix. Проверьте токен и аккаунт в config.json."
+            "error": "Не удалось запустить обновление."
         }), 200
 
+@app.route('/api/status')
+def get_status():
+    """Фронтенд может поллить этот эндпоинт пока is_loading=True."""
+    return jsonify({
+        "is_loading": DATA_CACHE["is_loading"],
+        "last_sync": DATA_CACHE["last_sync"]
+    })
+
 if __name__ == '__main__':
-    app.run(debug=True, port=8000)
+    app.run(debug=False, port=8000)

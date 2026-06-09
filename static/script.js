@@ -1,37 +1,34 @@
 document.addEventListener('DOMContentLoaded', () => {
     loadData();
 
-    // Синхронизация данных
     document.getElementById('btn-sync').addEventListener('click', () => {
         const btn = document.getElementById('btn-sync');
         btn.disabled = true;
-        btn.innerText = 'Обновление... (может занять 10-15 сек)';
-        
+        btn.innerText = 'Запускаем обновление...';
+
         fetch('/api/sync', { method: 'POST' })
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
-                    loadData(); // re-fetch and re-render
+                    pollUntilReady();
                 } else {
                     alert('Ошибка при обновлении: ' + data.error);
+                    btn.disabled = false;
+                    btn.innerText = '🔄 Обновить данные';
                 }
             })
             .catch(err => {
                 alert('Ошибка сети при обновлении');
                 console.error(err);
-            })
-            .finally(() => {
                 btn.disabled = false;
                 btn.innerText = '🔄 Обновить данные';
             });
     });
 
-    // Обработчик вкладок
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            
             btn.classList.add('active');
             const tabName = btn.getAttribute('data-tab');
             document.getElementById(`tab-content-${tabName}`).classList.add('active');
@@ -39,16 +36,56 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
+// Поллинг /api/status пока сервер обновляет данные в фоне
+function pollUntilReady() {
+    const btn = document.getElementById('btn-sync');
+    const syncLabel = document.getElementById('last-sync-time');
+    let dots = 0;
+
+    const interval = setInterval(() => {
+        dots = (dots + 1) % 4;
+        btn.innerText = 'Загрузка из Planfix' + '.'.repeat(dots);
+
+        fetch('/api/status')
+            .then(res => res.json())
+            .then(data => {
+                if (!data.is_loading) {
+                    clearInterval(interval);
+                    btn.disabled = false;
+                    btn.innerText = '🔄 Обновить данные';
+                    loadData();
+                } else if (data.last_sync) {
+                    syncLabel.innerText = 'Обновляется...';
+                }
+            })
+            .catch(() => {
+                clearInterval(interval);
+                btn.disabled = false;
+                btn.innerText = '🔄 Обновить данные';
+            });
+    }, 2000);
+}
+
 function loadData() {
     fetch('/api/data')
         .then(res => res.json())
         .then(data => {
-            renderDashboard(data.excel_sheet, data.planfix_fact);
-            
-            if (data.last_sync) {
-                document.getElementById('last-sync-time').innerText = 'Обновлено из Планфикса: ' + data.last_sync;
+            if (data.error) {
+                document.getElementById('last-sync-time').innerText = 'Ошибка: ' + data.error;
+                return;
+            }
+
+            renderDashboard(data.excel_sheet, data.planfix_fact || {});
+
+            const syncLabel = document.getElementById('last-sync-time');
+            if (data.is_loading) {
+                syncLabel.innerText = 'Загрузка данных из Planfix...';
+                // Автополлинг при первом открытии страницы
+                pollUntilReady();
+            } else if (data.last_sync) {
+                syncLabel.innerText = 'Обновлено из Планфикса: ' + data.last_sync;
             } else {
-                document.getElementById('last-sync-time').innerText = 'Загружено';
+                syncLabel.innerText = 'Загружено';
             }
         })
         .catch(err => {
@@ -59,9 +96,7 @@ function loadData() {
 
 function parseValue(val) {
     if (val === null || val === undefined || isNaN(val) || val === "") return 0;
-    if (typeof val === 'string') {
-        val = val.replace(/\s/g, ''); // remove spaces if any
-    }
+    if (typeof val === 'string') val = val.replace(/\s/g, '');
     const num = parseFloat(val);
     return isNaN(num) ? 0 : num;
 }
@@ -79,436 +114,205 @@ function formatDiff(val) {
 }
 
 function renderDashboard(sheetData, planfixData) {
-    if(!sheetData || !planfixData) return;
-    
+    if (!sheetData) return;
     renderDashboardV2(sheetData, planfixData);
     renderDashboardV1(sheetData, planfixData);
 }
 
-// ================= ОТРИСОВКА ВКЛАДКИ V2 (ОСНОВНОЙ ФОКУС) =================
+// ================= V2 =================
 function renderDashboardV2(sheetData, planfixData) {
     const categories = [
         {name: "Алюм, м2", optRow: 3, planfixName: "Алюм"},
-        {name: "ПВХ, м2", optRow: 4, planfixName: "ПВХ"},
-        {name: "СП, м2", optRow: 5, planfixName: "СП"},
-        {name: "НВФ, м2", optRow: 6, planfixName: "НВФ"}
+        {name: "ПВХ, м2",  optRow: 4, planfixName: "ПВХ"},
+        {name: "СП, м2",   optRow: 5, planfixName: "СП"},
+        {name: "НВФ, м2",  optRow: 6, planfixName: "НВФ"}
     ];
+    const months = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь","Итого за 12 мес"];
 
-    const months = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь", "Итого за 12 мес"];
-    
-    const tbodyFact = document.querySelector('#v2-table-fact tbody');
-    const tbodyOpt = document.querySelector('#v2-table-opt tbody');
+    const tbodyFact   = document.querySelector('#v2-table-fact tbody');
+    const tbodyOpt    = document.querySelector('#v2-table-opt tbody');
     const tbodyCumFact = document.querySelector('#v2-table-cumulative-fact tbody');
-    const tbodyCumOpt = document.querySelector('#v2-table-cumulative-opt tbody');
+    const tbodyCumOpt  = document.querySelector('#v2-table-cumulative-opt tbody');
+    tbodyFact.innerHTML = tbodyOpt.innerHTML = tbodyCumFact.innerHTML = tbodyCumOpt.innerHTML = '';
 
-    tbodyFact.innerHTML = '';
-    tbodyOpt.innerHTML = '';
-    tbodyCumFact.innerHTML = '';
-    tbodyCumOpt.innerHTML = '';
+    let totalOpt = 0, totalFact = 0;
+    let dataMap = {opt: {}, fact: {}};
+    let factMoneyByMonth = {}, moneyOptByMonth = {};
 
-    let totalOpt = 0;
-    let totalFact = 0;
-    let dataMap = { opt: {}, fact: {} };
-
-    // Расчет сумм по факту в тенге
-    let factMoneyByMonth = {};
     for (let m = 1; m <= 12; m++) {
         factMoneyByMonth[m] = 0;
         categories.forEach(cat => {
-            if (planfixData[m.toString()] && planfixData[m.toString()][cat.planfixName]) {
-                factMoneyByMonth[m] += planfixData[m.toString()][cat.planfixName].sum || 0;
-            }
+            if (planfixData[m] && planfixData[m][cat.planfixName])
+                factMoneyByMonth[m] += planfixData[m][cat.planfixName].sum || 0;
         });
     }
 
-    // 1. Таблица ФАКТ (v2)
     categories.forEach(cat => {
         dataMap.fact[cat.name] = [];
         let rFact = document.createElement('tr');
         rFact.innerHTML = `<td>${cat.name}</td>`;
         let factYearTotal = 0;
-
-        for(let m = 1; m <= 12; m++) {
-            let factVal = 0;
-            if (planfixData[m.toString()] && planfixData[m.toString()][cat.planfixName]) {
-                factVal = planfixData[m.toString()][cat.planfixName].m2;
-            }
-            dataMap.fact[cat.name][m] = factVal;
-            factYearTotal += factVal;
-            rFact.innerHTML += `<td>${formatNumber(factVal)}</td>`;
+        for (let m = 1; m <= 12; m++) {
+            let v = 0;
+            if (planfixData[m] && planfixData[m][cat.planfixName]) v = planfixData[m][cat.planfixName].m2 || 0;
+            dataMap.fact[cat.name][m] = v; factYearTotal += v;
+            rFact.innerHTML += `<td>${formatNumber(v)}</td>`;
         }
-
         rFact.innerHTML += `<td><strong>${formatNumber(factYearTotal)}</strong></td>`;
-        tbodyFact.appendChild(rFact);
-        totalFact += factYearTotal;
+        tbodyFact.appendChild(rFact); totalFact += factYearTotal;
     });
 
-    // Строка денег вверху для факта
-    let moneyRowFact = document.createElement('tr');
-    moneyRowFact.style.background = '#fce4d6';
-    moneyRowFact.innerHTML = `<td><strong>Факт Техновид, в тенге</strong></td>`;
-    let moneyFactYear = 0;
-    for(let m = 1; m <= 12; m++) {
-        let fM = factMoneyByMonth[m];
-        moneyFactYear += fM;
-        moneyRowFact.innerHTML += `<td><strong>${formatNumber(fM)}</strong></td>`;
-    }
-    moneyRowFact.innerHTML += `<td><strong>${formatNumber(moneyFactYear)}</strong></td>`;
-    tbodyFact.insertBefore(moneyRowFact, tbodyFact.firstChild);
+    let mrFact = document.createElement('tr'); mrFact.style.background = '#fce4d6';
+    mrFact.innerHTML = `<td><strong>Факт Техновид, в тенге</strong></td>`;
+    let mfY = 0;
+    for (let m = 1; m <= 12; m++) { mfY += factMoneyByMonth[m]; mrFact.innerHTML += `<td><strong>${formatNumber(factMoneyByMonth[m])}</strong></td>`; }
+    mrFact.innerHTML += `<td><strong>${formatNumber(mfY)}</strong></td>`;
+    tbodyFact.insertBefore(mrFact, tbodyFact.firstChild);
 
-    // 2. Таблица ПЛАН ОПТИМИСТ (v2)
-    let moneyOptByMonth = {};
     categories.forEach(cat => {
         dataMap.opt[cat.name] = [];
-        let rOpt = document.createElement('tr');
-        rOpt.innerHTML = `<td>${cat.name}</td>`;
-        let optYearTotal = 0;
-
-        for(let m = 1; m <= 12; m++) {
-            let optVal = parseValue(sheetData[cat.optRow][m + 1]);
-            dataMap.opt[cat.name][m] = optVal;
-            optYearTotal += optVal;
-            rOpt.innerHTML += `<td>${formatNumber(optVal)}</td>`;
-        }
-
-        rOpt.innerHTML += `<td><strong>${formatNumber(optYearTotal)}</strong></td>`;
-        tbodyOpt.appendChild(rOpt);
-        totalOpt += optYearTotal;
+        let rOpt = document.createElement('tr'); rOpt.innerHTML = `<td>${cat.name}</td>`;
+        let oY = 0;
+        for (let m = 1; m <= 12; m++) { let v = parseValue(sheetData[cat.optRow][m+1]); dataMap.opt[cat.name][m] = v; oY += v; rOpt.innerHTML += `<td>${formatNumber(v)}</td>`; }
+        rOpt.innerHTML += `<td><strong>${formatNumber(oY)}</strong></td>`;
+        tbodyOpt.appendChild(rOpt); totalOpt += oY;
     });
+    let mrOpt = document.createElement('tr'); mrOpt.style.background = '#e6f4ea';
+    mrOpt.innerHTML = `<td><strong>План, в тенге</strong></td>`;
+    let moY = 0;
+    for (let m = 1; m <= 12; m++) { let v = parseValue(sheetData[7][m+1]); moneyOptByMonth[m] = v; moY += v; mrOpt.innerHTML += `<td><strong>${formatNumber(v)}</strong></td>`; }
+    mrOpt.innerHTML += `<td><strong>${formatNumber(moY)}</strong></td>`;
+    tbodyOpt.appendChild(mrOpt);
 
-    // Строка денег внизу для плана Оптимист
-    let moneyRowOpt = document.createElement('tr');
-    moneyRowOpt.style.background = '#e6f4ea';
-    moneyRowOpt.innerHTML = `<td><strong>План, в тенге</strong></td>`;
-    let moneyOptYear = 0;
-    for(let m = 1; m <= 12; m++) {
-        let valO = parseValue(sheetData[7][m + 1]);
-        moneyOptByMonth[m] = valO;
-        moneyOptYear += valO;
-        moneyRowOpt.innerHTML += `<td><strong>${formatNumber(valO)}</strong></td>`;
-    }
-    moneyRowOpt.innerHTML += `<td><strong>${formatNumber(moneyOptYear)}</strong></td>`;
-    tbodyOpt.appendChild(moneyRowOpt);
+    let lastFM = 0;
+    for (let m = 1; m <= 12; m++) if (planfixData[m]) lastFM = m;
 
-    // 3. Таблица ФАКТ НАКОПИТЕЛЬНЫЙ (v2)
-    let cumFactRow = document.createElement('tr');
-    cumFactRow.style.background = '#fce4d6';
-    cumFactRow.innerHTML = `<td><strong>Факт Техновид, в тенге</strong></td>`;
-    let cumFact = 0;
-    let lastFactMonth = 0;
-    for(let m = 1; m <= 12; m++) {
-        if (!!planfixData[m.toString()]) {
-            lastFactMonth = m;
-        }
+    let rCF = document.createElement('tr'); rCF.style.background = '#fce4d6';
+    rCF.innerHTML = `<td><strong>Факт Техновид, в тенге</strong></td>`;
+    let cf = 0;
+    for (let m = 1; m <= 12; m++) {
+        if (m <= lastFM) { cf += factMoneyByMonth[m]||0; rCF.innerHTML += `<td><strong>${formatNumber(cf)}</strong></td>`; }
+        else rCF.innerHTML += `<td>-</td>`;
     }
+    rCF.innerHTML += `<td><strong>${lastFM > 0 ? formatNumber(cf) : '-'}</strong></td>`;
+    tbodyCumFact.appendChild(rCF);
 
-    for(let m = 1; m <= 12; m++) {
-        if (m <= lastFactMonth) {
-            cumFact += factMoneyByMonth[m] || 0;
-            cumFactRow.innerHTML += `<td><strong>${formatNumber(cumFact)}</strong></td>`;
-        } else {
-            cumFactRow.innerHTML += `<td>-</td>`;
-        }
-    }
-    if (lastFactMonth > 0) {
-        cumFactRow.innerHTML += `<td><strong>${formatNumber(cumFact)}</strong></td>`;
-    } else {
-        cumFactRow.innerHTML += `<td>-</td>`;
-    }
-    tbodyCumFact.appendChild(cumFactRow);
+    let rCO = document.createElement('tr'); rCO.style.background = '#e2efda';
+    rCO.innerHTML = `<td><strong>План Оптимист, в тенге</strong></td>`;
+    let co = 0;
+    for (let m = 1; m <= 12; m++) { co += moneyOptByMonth[m]||0; rCO.innerHTML += `<td><strong>${formatNumber(co)}</strong></td>`; }
+    rCO.innerHTML += `<td><strong>${formatNumber(co)}</strong></td>`;
+    tbodyCumOpt.appendChild(rCO);
 
-    // 4. Таблица ПЛАН НАКОПИТЕЛЬНЫЙ ОПТИМИСТ (v2)
-    let cumOptRow = document.createElement('tr');
-    cumOptRow.style.background = '#e2efda';
-    cumOptRow.innerHTML = `<td><strong>План Оптимист, в тенге</strong></td>`;
-    let cumOpt = 0;
-    for(let m = 1; m <= 12; m++) {
-        cumOpt += moneyOptByMonth[m] || 0;
-        cumOptRow.innerHTML += `<td><strong>${formatNumber(cumOpt)}</strong></td>`;
-    }
-    cumOptRow.innerHTML += `<td><strong>${formatNumber(cumOpt)}</strong></td>`;
-    tbodyCumOpt.appendChild(cumOptRow);
-
-    // Сводные карточки v2
     document.getElementById('v2-val-opt-m2').innerText = formatNumber(totalOpt);
     document.getElementById('v2-val-fact-m2').innerText = formatNumber(totalFact);
-    const pct = totalOpt > 0 ? Math.round((totalFact / totalOpt) * 100) : 0;
+    const pct = totalOpt > 0 ? Math.round(totalFact / totalOpt * 100) : 0;
     document.getElementById('v2-val-pct-opt').innerText = pct > 0 ? pct + "%" : "--";
 }
 
-// ================= ОТРИСОВКА ВКЛАДКИ V1 (ПОЛНАЯ АНАЛИТИКА) =================
+// ================= V1 =================
 function renderDashboardV1(sheetData, planfixData) {
     const categories = [
         {name: "Алюм, м2", optRow: 3, realRow: 12, planfixName: "Алюм"},
-        {name: "ПВХ, м2", optRow: 4, realRow: 13, planfixName: "ПВХ"},
-        {name: "СП, м2", optRow: 5, realRow: 14, planfixName: "СП"},
-        {name: "НВФ, м2", optRow: 6, realRow: 15, planfixName: "НВФ"}
+        {name: "ПВХ, м2",  optRow: 4, realRow: 13, planfixName: "ПВХ"},
+        {name: "СП, м2",   optRow: 5, realRow: 14, planfixName: "СП"},
+        {name: "НВФ, м2",  optRow: 6, realRow: 15, planfixName: "НВФ"}
     ];
 
-    let totalOpt = 0;
-    let totalReal = 0;
-    let totalFact = 0;
-
-    const tbodyOpt = document.querySelector('#v1-table-opt tbody');
+    const tbodyOpt  = document.querySelector('#v1-table-opt tbody');
     const tbodyReal = document.querySelector('#v1-table-real tbody');
     const tbodyFact = document.querySelector('#v1-table-fact tbody');
-    const tbodyDiffOpt = document.querySelector('#v1-table-diff-opt tbody');
+    const tbodyDiffOpt  = document.querySelector('#v1-table-diff-opt tbody');
     const tbodyDiffReal = document.querySelector('#v1-table-diff-real tbody');
-    const tbodyCumulative = document.querySelector('#v1-table-cumulative tbody');
+    const tbodyCum  = document.querySelector('#v1-table-cumulative tbody');
+    [tbodyOpt,tbodyReal,tbodyFact,tbodyDiffOpt,tbodyDiffReal,tbodyCum].forEach(t => { if(t) t.innerHTML=''; });
 
-    tbodyOpt.innerHTML = '';
-    tbodyReal.innerHTML = '';
-    tbodyFact.innerHTML = '';
-    tbodyDiffOpt.innerHTML = '';
-    tbodyDiffReal.innerHTML = '';
-    if (tbodyCumulative) tbodyCumulative.innerHTML = '';
+    let totO=0,totR=0,totF=0;
+    let factMoneyByMonth={}, moneyOptByMonth={}, moneyRealByMonth={};
+    let dm={opt:{},real:{},fact:{}};
 
-    let dataMap = { opt: {}, real: {}, fact: {} };
-
-    // Расчет сумм по факту в тенге
-    let factMoneyByMonth = {};
-    for (let m = 1; m <= 12; m++) {
-        factMoneyByMonth[m] = 0;
+    for (let m=1;m<=12;m++) {
+        factMoneyByMonth[m]=0;
         categories.forEach(cat => {
-            if (planfixData[m.toString()] && planfixData[m.toString()][cat.planfixName]) {
-                factMoneyByMonth[m] += planfixData[m.toString()][cat.planfixName].sum || 0;
-            }
+            if (planfixData[m] && planfixData[m][cat.planfixName])
+                factMoneyByMonth[m] += planfixData[m][cat.planfixName].sum||0;
         });
     }
 
     categories.forEach(cat => {
-        dataMap.opt[cat.name] = [];
-        dataMap.real[cat.name] = [];
-        dataMap.fact[cat.name] = [];
-
-        let rOpt = document.createElement('tr');
-        rOpt.innerHTML = `<td>${cat.name}</td>`;
-        let optYearTotal = 0;
-
-        let rReal = document.createElement('tr');
-        rReal.innerHTML = `<td>${cat.name}</td>`;
-        let realYearTotal = 0;
-
-        let rFact = document.createElement('tr');
-        rFact.innerHTML = `<td>${cat.name}</td>`;
-        let factYearTotal = 0;
-
-        for(let m = 1; m <= 12; m++) {
-            let optVal = parseValue(sheetData[cat.optRow][m + 1]);
-            dataMap.opt[cat.name][m] = optVal;
-            optYearTotal += optVal;
-            rOpt.innerHTML += `<td>${formatNumber(optVal)}</td>`;
-
-            let realVal = parseValue(sheetData[cat.realRow][m + 1]);
-            dataMap.real[cat.name][m] = realVal;
-            realYearTotal += realVal;
-            rReal.innerHTML += `<td>${formatNumber(realVal)}</td>`;
-
-            let factVal = 0;
-            if (planfixData[m.toString()] && planfixData[m.toString()][cat.planfixName]) {
-                factVal = planfixData[m.toString()][cat.planfixName].m2;
-            }
-            dataMap.fact[cat.name][m] = factVal;
-            factYearTotal += factVal;
-            rFact.innerHTML += `<td>${formatNumber(factVal)}</td>`;
+        dm.opt[cat.name]=[]; dm.real[cat.name]=[]; dm.fact[cat.name]=[];
+        let rO=document.createElement('tr'); rO.innerHTML=`<td>${cat.name}</td>`;
+        let rR=document.createElement('tr'); rR.innerHTML=`<td>${cat.name}</td>`;
+        let rF=document.createElement('tr'); rF.innerHTML=`<td>${cat.name}</td>`;
+        let oY=0,rY=0,fY=0;
+        for (let m=1;m<=12;m++) {
+            let ov=parseValue(sheetData[cat.optRow][m+1]); dm.opt[cat.name][m]=ov; oY+=ov; rO.innerHTML+=`<td>${formatNumber(ov)}</td>`;
+            let rv=parseValue(sheetData[cat.realRow][m+1]); dm.real[cat.name][m]=rv; rY+=rv; rR.innerHTML+=`<td>${formatNumber(rv)}</td>`;
+            let fv=0; if(planfixData[m]&&planfixData[m][cat.planfixName]) fv=planfixData[m][cat.planfixName].m2||0;
+            dm.fact[cat.name][m]=fv; fY+=fv; rF.innerHTML+=`<td>${formatNumber(fv)}</td>`;
         }
-
-        rOpt.innerHTML += `<td><strong>${formatNumber(optYearTotal)}</strong></td>`;
-        rReal.innerHTML += `<td><strong>${formatNumber(realYearTotal)}</strong></td>`;
-        rFact.innerHTML += `<td><strong>${formatNumber(factYearTotal)}</strong></td>`;
-
-        tbodyOpt.appendChild(rOpt);
-        tbodyReal.appendChild(rReal);
-        tbodyFact.appendChild(rFact);
-
-        totalOpt += optYearTotal;
-        totalReal += realYearTotal;
-        totalFact += factYearTotal;
+        rO.innerHTML+=`<td><strong>${formatNumber(oY)}</strong></td>`; tbodyOpt.appendChild(rO); totO+=oY;
+        rR.innerHTML+=`<td><strong>${formatNumber(rY)}</strong></td>`; tbodyReal.appendChild(rR); totR+=rY;
+        rF.innerHTML+=`<td><strong>${formatNumber(fY)}</strong></td>`; tbodyFact.appendChild(rF); totF+=fY;
     });
 
-    // ПЛАН ДЕНЬГИ ОПТИМИСТ
-    let moneyRowOpt = document.createElement('tr');
-    moneyRowOpt.style.background = '#e6f4ea';
-    moneyRowOpt.innerHTML = `<td><strong>План, в тенге</strong></td>`;
-    let moneyOptYear = 0;
-    
-    // ПЛАН ДЕНЬГИ РЕАЛИСТ
-    let moneyRowReal = document.createElement('tr');
-    moneyRowReal.style.background = '#e6f4ea';
-    moneyRowReal.innerHTML = `<td><strong>План, в тенге</strong></td>`;
-    let moneyRealYear = 0;
-
-    let moneyOptByMonth = {};
-    let moneyRealByMonth = {};
-
-    for(let m = 1; m <= 12; m++) {
-        let valO = parseValue(sheetData[7][m + 1]);
-        moneyOptByMonth[m] = valO;
-        moneyOptYear += valO;
-        moneyRowOpt.innerHTML += `<td><strong>${formatNumber(valO)}</strong></td>`;
-
-        let valR = parseValue(sheetData[16][m + 1]);
-        moneyRealByMonth[m] = valR;
-        moneyRealYear += valR;
-        moneyRowReal.innerHTML += `<td><strong>${formatNumber(valR)}</strong></td>`;
+    let mrO=document.createElement('tr'); mrO.style.background='#e6f4ea'; mrO.innerHTML=`<td><strong>План, в тенге</strong></td>`;
+    let mrR=document.createElement('tr'); mrR.style.background='#e6f4ea'; mrR.innerHTML=`<td><strong>План, в тенге</strong></td>`;
+    let oMY=0,rMY=0;
+    for (let m=1;m<=12;m++) {
+        let vo=parseValue(sheetData[7][m+1]); moneyOptByMonth[m]=vo; oMY+=vo; mrO.innerHTML+=`<td><strong>${formatNumber(vo)}</strong></td>`;
+        let vr=parseValue(sheetData[16][m+1]); moneyRealByMonth[m]=vr; rMY+=vr; mrR.innerHTML+=`<td><strong>${formatNumber(vr)}</strong></td>`;
     }
-    moneyRowOpt.innerHTML += `<td><strong>${formatNumber(moneyOptYear)}</strong></td>`;
-    moneyRowReal.innerHTML += `<td><strong>${formatNumber(moneyRealYear)}</strong></td>`;
+    mrO.innerHTML+=`<td><strong>${formatNumber(oMY)}</strong></td>`; tbodyOpt.appendChild(mrO);
+    mrR.innerHTML+=`<td><strong>${formatNumber(rMY)}</strong></td>`; tbodyReal.appendChild(mrR);
 
-    tbodyOpt.appendChild(moneyRowOpt);
-    tbodyReal.appendChild(moneyRowReal);
+    let mrF=document.createElement('tr'); mrF.style.background='#fce4d6'; mrF.innerHTML=`<td><strong>Факт Техновид, в тенге</strong></td>`;
+    let fMY=0;
+    for (let m=1;m<=12;m++) { fMY+=factMoneyByMonth[m]; mrF.innerHTML+=`<td><strong>${formatNumber(factMoneyByMonth[m])}</strong></td>`; }
+    mrF.innerHTML+=`<td><strong>${formatNumber(fMY)}</strong></td>`;
+    tbodyFact.insertBefore(mrF,tbodyFact.firstChild);
 
-    // ФАКТ ДЕНЬГИ (Вставляет вверх таблицы факта)
-    let moneyRowFact = document.createElement('tr');
-    moneyRowFact.style.background = '#fce4d6';
-    moneyRowFact.innerHTML = `<td><strong>Факт Техновид, в тенге</strong></td>`;
-    let moneyFactYear = 0;
-    for(let m = 1; m <= 12; m++) {
-        let fM = factMoneyByMonth[m];
-        moneyFactYear += fM;
-        moneyRowFact.innerHTML += `<td><strong>${formatNumber(fM)}</strong></td>`;
-    }
-    moneyRowFact.innerHTML += `<td><strong>${formatNumber(moneyFactYear)}</strong></td>`;
-    tbodyFact.insertBefore(moneyRowFact, tbodyFact.firstChild);
-
-    // ОТКЛОНЕНИЯ ОПТИМИСТ
-    let diffMoneyOptRow = document.createElement('tr');
-    diffMoneyOptRow.style.background = '#ddebf7';
-    diffMoneyOptRow.innerHTML = `<td><strong>Договора, в тенге</strong></td>`;
-    let diffMoneyOptYear = 0;
-    for(let m = 1; m <= 12; m++) {
-        let fM = factMoneyByMonth[m];
-        let oM = moneyOptByMonth[m];
-        let hasFact = !!planfixData[m.toString()];
-        if (hasFact) {
-            let d = fM !== 0 || oM !== 0 ? fM - oM : 0;
-            diffMoneyOptYear += d;
-            diffMoneyOptRow.innerHTML += `<td class="${d < 0 ? 'val-negative' : (d > 0 ? 'val-positive' : '')}"><strong>${formatDiff(d)}</strong></td>`;
-        } else {
-            diffMoneyOptRow.innerHTML += `<td>-</td>`;
+    // Отклонения
+    function buildDiffRows(tbody, planMoneyMap, planDmKey) {
+        let dMR=document.createElement('tr'); dMR.style.background='#ddebf7'; dMR.innerHTML=`<td><strong>Договора, в тенге</strong></td>`;
+        let dMY=0;
+        for (let m=1;m<=12;m++) {
+            if (planfixData[m]) { let d=factMoneyByMonth[m]-planMoneyMap[m]; dMY+=d; dMR.innerHTML+=`<td class="${d<0?'val-negative':(d>0?'val-positive':'')}"><strong>${formatDiff(d)}</strong></td>`; }
+            else dMR.innerHTML+=`<td>-</td>`;
         }
-    }
-    diffMoneyOptRow.innerHTML += `<td class="${diffMoneyOptYear < 0 ? 'val-negative' : ''}"><strong>${formatDiff(diffMoneyOptYear)}</strong></td>`;
-    tbodyDiffOpt.appendChild(diffMoneyOptRow);
-
-    categories.forEach(cat => {
-        let rDiffOpt = document.createElement('tr');
-        rDiffOpt.innerHTML = `<td>${cat.name}</td>`;
-        let diffOptYear = 0;
-        
-        for(let m = 1; m <= 12; m++) {
-            let f = dataMap.fact[cat.name][m];
-            let o = dataMap.opt[cat.name][m];
-            let hasFact = !!planfixData[m.toString()];
-            if (hasFact) {
-                let doVal = f !== 0 || o !== 0 ? f - o : 0;
-                diffOptYear += doVal;
-                rDiffOpt.innerHTML += `<td class="${doVal < 0 ? 'val-negative' : (doVal > 0 ? 'val-positive' : '')}">${formatDiff(doVal)}</td>`;
-            } else {
-                rDiffOpt.innerHTML += `<td>-</td>`;
+        dMR.innerHTML+=`<td class="${dMY<0?'val-negative':''}"><strong>${formatDiff(dMY)}</strong></td>`;
+        tbody.appendChild(dMR);
+        categories.forEach(cat => {
+            let r=document.createElement('tr'); r.innerHTML=`<td>${cat.name}</td>`;
+            let yT=0;
+            for (let m=1;m<=12;m++) {
+                if (planfixData[m]) { let d=dm.fact[cat.name][m]-dm[planDmKey][cat.name][m]; yT+=d; r.innerHTML+=`<td class="${d<0?'val-negative':(d>0?'val-positive':'')}">${formatDiff(d)}</td>`; }
+                else r.innerHTML+=`<td>-</td>`;
             }
-        }
-        rDiffOpt.innerHTML += `<td class="${diffOptYear < 0 ? 'val-negative' : ''}"><strong>${formatDiff(diffOptYear)}</strong></td>`;
-        tbodyDiffOpt.appendChild(rDiffOpt);
-    });
-
-    // ОТКЛОНЕНИЯ РЕАЛИСТ
-    let diffMoneyRealRow = document.createElement('tr');
-    diffMoneyRealRow.style.background = '#ddebf7';
-    diffMoneyRealRow.innerHTML = `<td><strong>Договора, в тенге</strong></td>`;
-    let diffMoneyRealYear = 0;
-    for(let m = 1; m <= 12; m++) {
-        let fM = factMoneyByMonth[m];
-        let rM = moneyRealByMonth[m];
-        let hasFact = !!planfixData[m.toString()];
-        if (hasFact) {
-            let d = fM !== 0 || rM !== 0 ? fM - rM : 0;
-            diffMoneyRealYear += d;
-            diffMoneyRealRow.innerHTML += `<td class="${d < 0 ? 'val-negative' : (d > 0 ? 'val-positive' : '')}"><strong>${formatDiff(d)}</strong></td>`;
-        } else {
-            diffMoneyRealRow.innerHTML += `<td>-</td>`;
-        }
+            r.innerHTML+=`<td class="${yT<0?'val-negative':''}"><strong>${formatDiff(yT)}</strong></td>`;
+            tbody.appendChild(r);
+        });
     }
-    diffMoneyRealRow.innerHTML += `<td class="${diffMoneyRealYear < 0 ? 'val-negative' : ''}"><strong>${formatDiff(diffMoneyRealYear)}</strong></td>`;
-    tbodyDiffReal.appendChild(diffMoneyRealRow);
+    buildDiffRows(tbodyDiffOpt, moneyOptByMonth, 'opt');
+    buildDiffRows(tbodyDiffReal, moneyRealByMonth, 'real');
 
-    categories.forEach(cat => {
-        let rDiffReal = document.createElement('tr');
-        rDiffReal.innerHTML = `<td>${cat.name}</td>`;
-        let diffRealYear = 0;
-
-        for(let m = 1; m <= 12; m++) {
-            let f = dataMap.fact[cat.name][m];
-            let r = dataMap.real[cat.name][m];
-            let hasFact = !!planfixData[m.toString()];
-            if (hasFact) {
-                let drVal = f !== 0 || r !== 0 ? f - r : 0;
-                diffRealYear += drVal;
-                rDiffReal.innerHTML += `<td class="${drVal < 0 ? 'val-negative' : (drVal > 0 ? 'val-positive' : '')}">${formatDiff(drVal)}</td>`;
-            } else {
-                rDiffReal.innerHTML += `<td>-</td>`;
-            }
-        }
-        rDiffReal.innerHTML += `<td class="${diffRealYear < 0 ? 'val-negative' : ''}"><strong>${formatDiff(diffRealYear)}</strong></td>`;
-        tbodyDiffReal.appendChild(rDiffReal);
-    });
-
-    // НАКОПИТЕЛЬНЫЕ ИТОГИ v1
-    if (tbodyCumulative) {
-        // Cumulative Opt
-        let cumOptRow = document.createElement('tr');
-        cumOptRow.style.background = '#e2efda';
-        cumOptRow.innerHTML = `<td><strong>План Оптимист, в тенге</strong></td>`;
-        let cumOpt = 0;
-        for(let m = 1; m <= 12; m++) {
-            cumOpt += moneyOptByMonth[m] || 0;
-            cumOptRow.innerHTML += `<td><strong>${formatNumber(cumOpt)}</strong></td>`;
-        }
-        cumOptRow.innerHTML += `<td><strong>${formatNumber(cumOpt)}</strong></td>`;
-        tbodyCumulative.appendChild(cumOptRow);
-
-        // Cumulative Real
-        let cumRealRow = document.createElement('tr');
-        cumRealRow.style.background = '#ddebf7';
-        cumRealRow.innerHTML = `<td><strong>План Реалист, в тенге</strong></td>`;
-        let cumReal = 0;
-        for(let m = 1; m <= 12; m++) {
-            cumReal += moneyRealByMonth[m] || 0;
-            cumRealRow.innerHTML += `<td><strong>${formatNumber(cumReal)}</strong></td>`;
-        }
-        cumRealRow.innerHTML += `<td><strong>${formatNumber(cumReal)}</strong></td>`;
-        tbodyCumulative.appendChild(cumRealRow);
-
-        // Cumulative Fact
-        let cumFactRow = document.createElement('tr');
-        cumFactRow.style.background = '#fce4d6';
-        cumFactRow.innerHTML = `<td><strong>Факт Техновид, в тенге</strong></td>`;
-        let cumFact = 0;
-        let lastFactMonth = 0;
-        for(let m = 1; m <= 12; m++) {
-            if (!!planfixData[m.toString()]) {
-                lastFactMonth = m;
-            }
-        }
-
-        for(let m = 1; m <= 12; m++) {
-            if (m <= lastFactMonth) {
-                cumFact += factMoneyByMonth[m] || 0;
-                cumFactRow.innerHTML += `<td><strong>${formatNumber(cumFact)}</strong></td>`;
-            } else {
-                cumFactRow.innerHTML += `<td>-</td>`;
-            }
-        }
-        if (lastFactMonth > 0) {
-            cumFactRow.innerHTML += `<td><strong>${formatNumber(cumFact)}</strong></td>`;
-        } else {
-            cumFactRow.innerHTML += `<td>-</td>`;
-        }
-        tbodyCumulative.appendChild(cumFactRow);
+    // Накопительные
+    let lastFM=0; for (let m=1;m<=12;m++) if (planfixData[m]) lastFM=m;
+    let rCO=document.createElement('tr'); rCO.style.background='#e2efda'; rCO.innerHTML=`<td><strong>План Оптимист, в тенге</strong></td>`;
+    let rCR=document.createElement('tr'); rCR.style.background='#ddebf7'; rCR.innerHTML=`<td><strong>План Реалист, в тенге</strong></td>`;
+    let rCF=document.createElement('tr'); rCF.style.background='#fce4d6'; rCF.innerHTML=`<td><strong>Факт Техновид, в тенге</strong></td>`;
+    let co=0,cr=0,cf=0;
+    for (let m=1;m<=12;m++) {
+        co+=moneyOptByMonth[m]||0; rCO.innerHTML+=`<td><strong>${formatNumber(co)}</strong></td>`;
+        cr+=moneyRealByMonth[m]||0; rCR.innerHTML+=`<td><strong>${formatNumber(cr)}</strong></td>`;
+        if (m<=lastFM) { cf+=factMoneyByMonth[m]||0; rCF.innerHTML+=`<td><strong>${formatNumber(cf)}</strong></td>`; }
+        else rCF.innerHTML+=`<td>-</td>`;
     }
+    rCO.innerHTML+=`<td><strong>${formatNumber(co)}</strong></td>`; tbodyCum.appendChild(rCO);
+    rCR.innerHTML+=`<td><strong>${formatNumber(cr)}</strong></td>`; tbodyCum.appendChild(rCR);
+    rCF.innerHTML+=`<td><strong>${lastFM>0?formatNumber(cf):'-'}</strong></td>`; tbodyCum.appendChild(rCF);
 
-    // Сводные карточки v1
-    document.getElementById('v1-val-opt-m2').innerText = formatNumber(totalOpt);
-    document.getElementById('v1-val-real-m2').innerText = formatNumber(totalReal);
-    document.getElementById('v1-val-fact-m2').innerText = formatNumber(totalFact);
+    document.getElementById('v1-val-opt-m2').innerText = formatNumber(totO);
+    document.getElementById('v1-val-real-m2').innerText = formatNumber(totR);
+    document.getElementById('v1-val-fact-m2').innerText = formatNumber(totF);
 }
