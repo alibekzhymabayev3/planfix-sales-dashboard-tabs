@@ -3,6 +3,7 @@ import json
 import os
 import asyncio
 import datetime
+import threading
 from planfix_api import fetch_planfix_fact
 
 app = Flask(__name__, static_folder='static', static_url_path='')
@@ -11,6 +12,26 @@ DATA_CACHE = {
     "planfix_fact": None,
     "last_sync": None
 }
+
+def run_async(coro):
+    """Безопасный запуск async-функции из синхронного Flask-роута.
+    Создаёт новый event loop в отдельном потоке — совместимо с любым WSGI-сервером."""
+    result = {}
+    def target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result['value'] = loop.run_until_complete(coro)
+        except Exception as e:
+            result['error'] = e
+        finally:
+            loop.close()
+    t = threading.Thread(target=target)
+    t.start()
+    t.join()
+    if 'error' in result:
+        raise result['error']
+    return result['value']
 
 @app.route('/')
 def serve_index():
@@ -27,7 +48,7 @@ def get_data():
         json_path = os.path.join(root_path, 'excel_structure.json')
         with open(json_path, 'r', encoding='utf-8') as f:
             excel_data = json.load(f)
-            
+
         import math
         def sanitize_data(val):
             if isinstance(val, float) and math.isnan(val):
@@ -39,24 +60,23 @@ def get_data():
             return val
 
         sheet_data = sanitize_data(excel_data.get('Расчет объема по месяцам', []))
-        
-        # Pull facts from cache, or fetch if it's empty
+
         if DATA_CACHE["planfix_fact"] is None:
             try:
-                DATA_CACHE["planfix_fact"] = asyncio.run(fetch_planfix_fact())
+                DATA_CACHE["planfix_fact"] = run_async(fetch_planfix_fact())
                 DATA_CACHE["last_sync"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             except Exception as api_err:
                 print(f"WARN: Could not fetch facts from Planfix: {api_err}")
                 DATA_CACHE["planfix_fact"] = {}
                 DATA_CACHE["last_sync"] = "Offline (Planfix API not configured)"
-        
+
         response = {
             "excel_sheet": sheet_data,
             "planfix_fact": DATA_CACHE["planfix_fact"],
             "last_sync": DATA_CACHE["last_sync"]
         }
         return jsonify(response)
-    
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -65,14 +85,14 @@ def get_data():
 @app.route('/api/sync', methods=['POST'])
 def sync_data():
     try:
-        DATA_CACHE["planfix_fact"] = asyncio.run(fetch_planfix_fact())
+        DATA_CACHE["planfix_fact"] = run_async(fetch_planfix_fact())
         DATA_CACHE["last_sync"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         return jsonify({"status": "success", "last_sync": DATA_CACHE["last_sync"]})
     except Exception as e:
         print(f"Sync failed: {e}")
         return jsonify({
             "status": "error",
-            "error": "Не удалось подключиться к Planfix. Пожалуйста, проверьте настройки токена и аккаунта в файле config.json."
+            "error": "Не удалось подключиться к Planfix. Проверьте токен и аккаунт в config.json."
         }), 200
 
 if __name__ == '__main__':
